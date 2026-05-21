@@ -3,11 +3,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy import stats
-from utils.db import get_patient_features, run_query
+from utils.db import get_patient_features, run_query, CDM
 from utils.plots import plot_cohort_comparison, plot_top_concepts
 import plotly.express as px
 import plotly.graph_objects as go
-from utils.db import CDM
 
 st.set_page_config(page_title="Comparación de Cohortes",
                    page_icon="👥", layout="wide")

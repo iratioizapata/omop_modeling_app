@@ -34,8 +34,7 @@ def run_query(sql: str, params: dict = None) -> pd.DataFrame:
 
 def test_connection() -> tuple[bool, str]:
     try:
-        df = run_query("SELECT COUNT(*) AS n FROM {cdm}.person"
-                       .replace("{cdm}", os.getenv("CDM_SCHEMA", "cdm")))
+        df = run_query("SELECT COUNT(*) AS n FROM " + CDM() + ".person")
         return True, f"Conexión OK — {df['n'].iloc[0]:,} personas"
     except Exception as e:
         return False, str(e)
@@ -43,9 +42,9 @@ def test_connection() -> tuple[bool, str]:
 
 # ── Esquemas ──────────────────────────────────────────────────────────────────
 
-CDM   = os.getenv("CDM_SCHEMA",     "cdm")
-RES   = os.getenv("RESULTS_SCHEMA", "results")
-VOCAB = os.getenv("VOCAB_SCHEMA",   "cdm")
+def CDM():   return os.getenv("CDM_SCHEMA",     "omop2")
+def RES():   return os.getenv("RESULTS_SCHEMA", "results2")
+def VOCAB(): return os.getenv("VOCAB_SCHEMA",   "omop2")
 
 # ── Queries OMOP reutilizables ────────────────────────────────────────────────
 
@@ -57,8 +56,8 @@ def get_cohort_summary() -> pd.DataFrame:
             MIN(v.visit_start_date)              AS first_visit,
             MAX(v.visit_start_date)              AS last_visit,
             COUNT(DISTINCT v.visit_occurrence_id) AS n_visits
-        FROM {CDM}.person p
-        LEFT JOIN {CDM}.visit_occurrence v USING (person_id)
+        FROM {CDM()}.person p
+        LEFT JOIN {CDM()}.visit_occurrence v USING (person_id)
     """)
 
 
@@ -71,9 +70,9 @@ def get_demographics() -> pd.DataFrame:
             EXTRACT(YEAR FROM CURRENT_DATE) - p.year_of_birth AS age,
             p.year_of_birth,
             c_race.concept_name                          AS race
-        FROM {CDM}.person p
-        LEFT JOIN {CDM}.concept c_gender ON p.gender_concept_id  = c_gender.concept_id
-        LEFT JOIN {CDM}.concept c_race   ON p.race_concept_id    = c_race.concept_id
+        FROM {CDM()}.person p
+        LEFT JOIN {CDM()}.concept c_gender ON p.gender_concept_id  = c_gender.concept_id
+        LEFT JOIN {CDM()}.concept c_race   ON p.race_concept_id    = c_race.concept_id
         WHERE p.year_of_birth IS NOT NULL
     """)
 
@@ -86,8 +85,8 @@ def get_top_conditions(n: int = 20) -> pd.DataFrame:
             c.vocabulary_id,
             COUNT(DISTINCT co.person_id) AS n_patients,
             COUNT(*)                     AS n_records
-        FROM {CDM}.condition_occurrence co
-        JOIN {CDM}.concept c ON co.condition_concept_id = c.concept_id
+        FROM {CDM()}.condition_occurrence co
+        JOIN {CDM()}.concept c ON co.condition_concept_id = c.concept_id
         WHERE c.concept_id != 0
         GROUP BY 1,2,3
         ORDER BY n_patients DESC
@@ -103,8 +102,8 @@ def get_top_drugs(n: int = 20) -> pd.DataFrame:
             c.vocabulary_id,
             COUNT(DISTINCT de.person_id) AS n_patients,
             COUNT(*)                     AS n_records
-        FROM {CDM}.drug_exposure de
-        JOIN {CDM}.concept c ON de.drug_concept_id = c.concept_id
+        FROM {CDM()}.drug_exposure de
+        JOIN {CDM()}.concept c ON de.drug_concept_id = c.concept_id
         WHERE c.concept_id != 0
         GROUP BY 1,2,3
         ORDER BY n_patients DESC
@@ -132,16 +131,16 @@ def get_patient_features(
             EXTRACT(YEAR FROM CURRENT_DATE) - p.year_of_birth AS age,
             CASE WHEN c_g.concept_name = 'MALE' THEN 1 ELSE 0 END AS is_male,
             MIN(v.visit_start_date) AS index_date
-        FROM {CDM}.person p
-        JOIN {CDM}.visit_occurrence v USING (person_id)
-        LEFT JOIN {CDM}.concept c_g ON p.gender_concept_id = c_g.concept_id
+        FROM {CDM()}.person p
+        JOIN {CDM()}.visit_occurrence v USING (person_id)
+        LEFT JOIN {CDM()}.concept c_g ON p.gender_concept_id = c_g.concept_id
         GROUP BY p.person_id, p.year_of_birth, c_g.concept_name
     ),
     cond_count AS (
         SELECT co.person_id,
                COUNT(DISTINCT co.condition_concept_id) AS n_distinct_conditions,
                COUNT(*) AS n_condition_records
-        FROM {CDM}.condition_occurrence co
+        FROM {CDM()}.condition_occurrence co
         JOIN base b ON co.person_id = b.person_id
             AND co.condition_start_date BETWEEN
                 b.index_date - INTERVAL '{lookback_days} days' AND b.index_date
@@ -151,7 +150,7 @@ def get_patient_features(
         SELECT de.person_id,
                COUNT(DISTINCT de.drug_concept_id) AS n_distinct_drugs,
                COUNT(*) AS n_drug_records
-        FROM {CDM}.drug_exposure de
+        FROM {CDM()}.drug_exposure de
         JOIN base b ON de.person_id = b.person_id
             AND de.drug_exposure_start_date BETWEEN
                 b.index_date - INTERVAL '{lookback_days} days' AND b.index_date
@@ -160,7 +159,7 @@ def get_patient_features(
     visit_count AS (
         SELECT v.person_id,
                COUNT(*) AS n_visits
-        FROM {CDM}.visit_occurrence v
+        FROM {CDM()}.visit_occurrence v
         JOIN base b ON v.person_id = b.person_id
             AND v.visit_start_date BETWEEN
                 b.index_date - INTERVAL '{lookback_days} days' AND b.index_date
@@ -170,7 +169,7 @@ def get_patient_features(
         SELECT m.person_id,
                COUNT(*) AS n_measurements,
                AVG(m.value_as_number) FILTER (WHERE m.value_as_number IS NOT NULL) AS avg_measurement_value
-        FROM {CDM}.measurement m
+        FROM {CDM()}.measurement m
         JOIN base b ON m.person_id = b.person_id
             AND m.measurement_date BETWEEN
                 b.index_date - INTERVAL '{lookback_days} days' AND b.index_date
@@ -217,18 +216,18 @@ def get_survival_data(outcome_concept_id: int, max_follow_days: int = 1825) -> p
     return run_query(f"""
     WITH index_dates AS (
         SELECT person_id, MIN(visit_start_date) AS index_date
-        FROM {CDM}.visit_occurrence
+        FROM {CDM()}.visit_occurrence
         GROUP BY person_id
     ),
     last_obs AS (
         SELECT person_id, MAX(visit_start_date) AS last_date
-        FROM {CDM}.visit_occurrence
+        FROM {CDM()}.visit_occurrence
         GROUP BY person_id
     ),
     events AS (
         SELECT DISTINCT co.person_id,
                MIN(co.condition_start_date) AS event_date
-        FROM {CDM}.condition_occurrence co
+        FROM {CDM()}.condition_occurrence co
         WHERE co.condition_concept_id = :outcome_id
         GROUP BY co.person_id
     ),
@@ -236,8 +235,8 @@ def get_survival_data(outcome_concept_id: int, max_follow_days: int = 1825) -> p
         SELECT p.person_id,
                EXTRACT(YEAR FROM CURRENT_DATE) - p.year_of_birth AS age,
                c.concept_name AS gender
-        FROM {CDM}.person p
-        LEFT JOIN {CDM}.concept c ON p.gender_concept_id = c.concept_id
+        FROM {CDM()}.person p
+        LEFT JOIN {CDM()}.concept c ON p.gender_concept_id = c.concept_id
     )
     SELECT
         i.person_id,
@@ -266,7 +265,7 @@ def search_concepts(query: str, domain: str = None, limit: int = 50) -> pd.DataF
     return run_query(f"""
         SELECT concept_id, concept_name, concept_code,
                domain_id, vocabulary_id, standard_concept
-        FROM {VOCAB}.concept
+        FROM {VOCAB()}.concept
         WHERE LOWER(concept_name) LIKE LOWER(:q)
           AND standard_concept = 'S'
           AND invalid_reason IS NULL
