@@ -98,10 +98,20 @@ with col3:
     <div class="feature-card">
       <h3>👥 Comparación de Cohortes</h3>
       <p>Define dos cohortes por concept ID y genera automáticamente
-      la Tabla 1 con SMD, tests Mann-Whitney y Chi² para comparación.</p>
+      la Tabla 1 con SMD, tests Mann-Whitney y Chi². Incluye
+      comorbilidades y patrones de tratamiento antes/después.</p>
       <span class="badge badge-green">Tabla 1</span>
       <span class="badge badge-green">SMD</span>
-      <span class="badge badge-green">Tests</span>
+      <span class="badge badge-green">Comorbilidades</span>
+    </div>
+    <div class="feature-card">
+      <h3>📋 Caracterización OMOP</h3>
+      <p>Resumen completo de la BBDD siguiendo la metodología OHDSI:
+      cuantificación, demografía, volumen por dominio, prevalencia,
+      incidencia anual y métricas de calidad de datos.</p>
+      <span class="badge badge-blue">OHDSI</span>
+      <span class="badge badge-blue">Prevalencia</span>
+      <span class="badge badge-blue">Calidad</span>
     </div>
     """, unsafe_allow_html=True)
 

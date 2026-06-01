@@ -189,3 +189,83 @@ def plot_cohort_comparison(df: pd.DataFrame, feature: str,
                   color_discrete_sequence=PALETTE,
                   labels={group_col: "Cohorte", feature: feature})
     return fig_layout(fig, f"Comparación: {feature}", height=400)
+
+
+def plot_records_volume(df: pd.DataFrame) -> go.Figure:
+    """Barras: volumen de registros por dominio OMOP."""
+    df2 = df.sort_values("n_records")
+    fig = px.bar(df2, x="n_records", y="domain", orientation="h",
+                 color_discrete_sequence=[BLUE],
+                 labels={"n_records": "Nº de registros", "domain": ""},
+                 text="n_records")
+    fig.update_traces(texttemplate="%{text:,}", textposition="outside")
+    return fig_layout(fig, "Volumen de registros por dominio", height=460)
+
+
+def plot_observation_years(df: pd.DataFrame) -> go.Figure:
+    """Histograma del tiempo de observación por paciente (años)."""
+    fig = px.histogram(df, x="years_observed", nbins=30,
+                       color_discrete_sequence=[LBLUE],
+                       labels={"years_observed": "Años de seguimiento",
+                               "count": "Pacientes"})
+    fig.update_traces(marker_line_color="white", marker_line_width=0.5)
+    return fig_layout(fig, "Tiempo de observación por paciente", height=380)
+
+
+def plot_race_distribution(df: pd.DataFrame) -> go.Figure:
+    """Pie chart por raza/etnicidad."""
+    counts = df["race"].value_counts().reset_index()
+    counts.columns = ["race", "n"]
+    counts = counts.head(8)
+    fig = px.pie(counts, names="race", values="n",
+                 color_discrete_sequence=PALETTE, hole=0.4)
+    fig.update_traces(textposition="outside", textinfo="percent+label")
+    return fig_layout(fig, "Distribución por raza", height=360)
+
+
+def plot_ethnicity_distribution(df: pd.DataFrame) -> go.Figure:
+    counts = df["ethnicity"].value_counts().reset_index()
+    counts.columns = ["ethnicity", "n"]
+    counts = counts.head(8)
+    fig = px.pie(counts, names="ethnicity", values="n",
+                 color_discrete_sequence=PALETTE, hole=0.4)
+    fig.update_traces(textposition="outside", textinfo="percent+label")
+    return fig_layout(fig, "Distribución por etnicidad", height=360)
+
+
+def plot_visit_types(df: pd.DataFrame) -> go.Figure:
+    df2 = df.head(15).sort_values("n_visits")
+    fig = px.bar(df2, x="n_visits", y="visit_type", orientation="h",
+                 color_discrete_sequence=[ORANGE],
+                 labels={"n_visits": "Nº de visitas", "visit_type": ""})
+    return fig_layout(fig, "Tipos de encuentros médicos", height=460)
+
+
+def plot_incidence_by_year(df: pd.DataFrame, title: str = "Incidencia anual") -> go.Figure:
+    """Línea: nuevos casos por año."""
+    fig = px.line(df, x="year", y="n_new_cases", markers=True,
+                  color_discrete_sequence=[BLUE],
+                  labels={"year": "Año", "n_new_cases": "Nuevos casos"})
+    fig.update_traces(line=dict(width=2.5), marker=dict(size=8))
+    return fig_layout(fig, title, height=380)
+
+
+def plot_age_pyramid(df: pd.DataFrame) -> go.Figure:
+    """Pirámide poblacional edad x sexo."""
+    bins = [0, 10, 20, 30, 40, 50, 60, 70, 80, 200]
+    lbls = ["<10", "10-19", "20-29", "30-39", "40-49",
+            "50-59", "60-69", "70-79", "80+"]
+    df = df.copy()
+    df["age_grp"] = pd.cut(df["age"], bins=bins, labels=lbls)
+    male = df[df["gender"].str.upper() == "MALE"]["age_grp"].value_counts().reindex(lbls, fill_value=0)
+    fem  = df[df["gender"].str.upper() == "FEMALE"]["age_grp"].value_counts().reindex(lbls, fill_value=0)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(y=lbls, x=-male.values, name="Hombres",
+                          orientation="h", marker_color=BLUE))
+    fig.add_trace(go.Bar(y=lbls, x=fem.values, name="Mujeres",
+                          orientation="h", marker_color=ORANGE))
+    fig.update_layout(barmode="relative",
+                      xaxis_title="Pacientes",
+                      yaxis_title="Grupo de edad")
+    return fig_layout(fig, "Pirámide poblacional", height=440)

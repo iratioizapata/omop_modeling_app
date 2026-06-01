@@ -3,7 +3,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy import stats
-from utils.db import get_patient_features, run_query, CDM
+from utils.db import (get_patient_features, run_query, CDM,
+                       get_cohort_comorbidities, get_cohort_treatments)
 from utils.plots import plot_cohort_comparison, plot_top_concepts
 import plotly.express as px
 import plotly.graph_objects as go
@@ -80,8 +81,9 @@ if "cohort_comb" in st.session_state:
     df_comb = st.session_state["cohort_comb"]
     lbl_a, lbl_b = st.session_state["cohort_lbls"]
 
-    tab1, tab2, tab3 = st.tabs(
-        ["📊 Tabla 1 (Características)", "📉 Gráficos", "🔬 Tests estadísticos"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["📊 Tabla 1 (Características)", "📉 Gráficos", "🔬 Tests estadísticos",
+         "🩺 Comorbilidades", "💊 Patrones de tratamiento"])
 
     # ── TAB 1: TABLA 1 ────────────────────────────────────────────────────────
     with tab1:
@@ -227,3 +229,108 @@ if "cohort_comb" in st.session_state:
                           hide_index=True)
         else:
             st.info("Sin variables categóricas para comparar.")
+
+    # ── TAB 4: COMORBILIDADES ─────────────────────────────────────────────────
+    with tab4:
+        st.subheader("Comorbilidades observadas en cada cohorte")
+        st.caption("Top condiciones concomitantes (excluyendo la propia "
+                   "condición que define la cohorte).")
+        n_co = st.slider("Top N comorbilidades", 5, 30, 15, key="n_comorb")
+
+        if st.button("Calcular comorbilidades", key="run_comorb"):
+            try:
+                with st.spinner(f"Cohorte {lbl_a}..."):
+                    st.session_state["comorb_a"] = get_cohort_comorbidities(
+                        int(st.session_state["cid_a"]), n_co)
+                with st.spinner(f"Cohorte {lbl_b}..."):
+                    st.session_state["comorb_b"] = get_cohort_comorbidities(
+                        int(st.session_state["cid_b"]), n_co)
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+        if "comorb_a" in st.session_state and "comorb_b" in st.session_state:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"**{lbl_a}**")
+                st.plotly_chart(
+                    plot_top_concepts(st.session_state["comorb_a"],
+                                       title=f"Comorbilidades — {lbl_a}"),
+                    use_container_width=True)
+                st.dataframe(st.session_state["comorb_a"]
+                              [["concept_name","n_patients","prop_cohort"]]
+                              .round(3),
+                              use_container_width=True, hide_index=True)
+            with col2:
+                st.markdown(f"**{lbl_b}**")
+                st.plotly_chart(
+                    plot_top_concepts(st.session_state["comorb_b"],
+                                       title=f"Comorbilidades — {lbl_b}"),
+                    use_container_width=True)
+                st.dataframe(st.session_state["comorb_b"]
+                              [["concept_name","n_patients","prop_cohort"]]
+                              .round(3),
+                              use_container_width=True, hide_index=True)
+
+    # ── TAB 5: PATRONES DE TRATAMIENTO ────────────────────────────────────────
+    with tab5:
+        st.subheader("Tratamientos previos y posteriores a la inclusión")
+        st.caption("Top fármacos en la ventana definida respecto a la "
+                   "primera aparición de la condición que define la cohorte.")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            window = st.number_input("Ventana (días)", 30, 1095, 365,
+                                       step=30, key="tx_window")
+        with col2:
+            n_tx = st.number_input("Top N fármacos", 5, 30, 15,
+                                     step=1, key="n_tx")
+
+        if st.button("Calcular tratamientos", key="run_tx"):
+            try:
+                cid_a = int(st.session_state["cid_a"])
+                cid_b = int(st.session_state["cid_b"])
+                with st.spinner("Cohorte A — antes..."):
+                    st.session_state["tx_a_before"] = get_cohort_treatments(
+                        cid_a, "before", window, n_tx)
+                with st.spinner("Cohorte A — después..."):
+                    st.session_state["tx_a_after"]  = get_cohort_treatments(
+                        cid_a, "after",  window, n_tx)
+                with st.spinner("Cohorte B — antes..."):
+                    st.session_state["tx_b_before"] = get_cohort_treatments(
+                        cid_b, "before", window, n_tx)
+                with st.spinner("Cohorte B — después..."):
+                    st.session_state["tx_b_after"]  = get_cohort_treatments(
+                        cid_b, "after",  window, n_tx)
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+        if "tx_a_before" in st.session_state:
+            st.markdown(f"#### Cohorte: {lbl_a}")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f"**Antes (-{window}d → 0d)**")
+                st.plotly_chart(
+                    plot_top_concepts(st.session_state["tx_a_before"],
+                                       title="Tratamientos previos"),
+                    use_container_width=True)
+            with c2:
+                st.markdown(f"**Después (0d → +{window}d)**")
+                st.plotly_chart(
+                    plot_top_concepts(st.session_state["tx_a_after"],
+                                       title="Tratamientos posteriores"),
+                    use_container_width=True)
+
+            st.markdown(f"#### Cohorte: {lbl_b}")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f"**Antes (-{window}d → 0d)**")
+                st.plotly_chart(
+                    plot_top_concepts(st.session_state["tx_b_before"],
+                                       title="Tratamientos previos"),
+                    use_container_width=True)
+            with c2:
+                st.markdown(f"**Después (0d → +{window}d)**")
+                st.plotly_chart(
+                    plot_top_concepts(st.session_state["tx_b_after"],
+                                       title="Tratamientos posteriores"),
+                    use_container_width=True)

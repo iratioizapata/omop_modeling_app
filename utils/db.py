@@ -178,7 +178,7 @@ def get_patient_features(
     {"," if outcome_concept_id else ""}
     {"outcome AS (" if outcome_concept_id else ""}
     {"SELECT DISTINCT co.person_id, 1 AS has_outcome" if outcome_concept_id else ""}
-    {"FROM " + CDM + ".condition_occurrence co" if outcome_concept_id else ""}
+    {"FROM " + CDM() + ".condition_occurrence co" if outcome_concept_id else ""}
     {"JOIN base b ON co.person_id = b.person_id" if outcome_concept_id else ""}
     {"AND co.condition_start_date BETWEEN b.index_date AND b.index_date + INTERVAL '" + str(prediction_window) + " days'" if outcome_concept_id else ""}
     {"WHERE co.condition_concept_id = " + str(outcome_concept_id) if outcome_concept_id else ""}
@@ -273,3 +273,295 @@ def search_concepts(query: str, domain: str = None, limit: int = 50) -> pd.DataF
         ORDER BY concept_name
         LIMIT :lim
     """, {"q": f"%{query}%", "lim": limit})
+
+
+# ── Caracterización de la base de datos OMOP ──────────────────────────────────
+
+def get_records_volume() -> pd.DataFrame:
+    """Conteo total de registros y pacientes únicos por dominio principal."""
+    parts = []
+    domains = [
+        ("Person",                "person",              "person_id"),
+        ("Visit Occurrence",      "visit_occurrence",    "person_id"),
+        ("Condition Occurrence",  "condition_occurrence","person_id"),
+        ("Drug Exposure",         "drug_exposure",       "person_id"),
+        ("Procedure Occurrence",  "procedure_occurrence","person_id"),
+        ("Measurement",           "measurement",         "person_id"),
+        ("Observation",           "observation",         "person_id"),
+        ("Device Exposure",       "device_exposure",     "person_id"),
+        ("Note",                  "note",                "person_id"),
+        ("Death",                 "death",               "person_id"),
+    ]
+    for label, table, pid in domains:
+        parts.append(f"""
+            SELECT '{label}' AS domain,
+                   COUNT(*)                AS n_records,
+                   COUNT(DISTINCT {pid})   AS n_patients
+            FROM {CDM()}.{table}
+        """)
+    sql = " UNION ALL ".join(parts) + " ORDER BY n_records DESC"
+    try:
+        return run_query(sql)
+    except Exception:
+        # Si alguna tabla no existe en el esquema, ir una a una
+        rows = []
+        for label, table, pid in domains:
+            try:
+                df = run_query(f"""
+                    SELECT '{label}' AS domain,
+                           COUNT(*)              AS n_records,
+                           COUNT(DISTINCT {pid}) AS n_patients
+                    FROM {CDM()}.{table}
+                """)
+                rows.append(df)
+            except Exception:
+                continue
+        return pd.concat(rows, ignore_index=True).sort_values(
+            "n_records", ascending=False) if rows else pd.DataFrame()
+
+
+def get_observation_period_stats() -> pd.DataFrame:
+    """Distribución del tiempo de observación por paciente (en años)."""
+    return run_query(f"""
+        SELECT
+            person_id,
+            observation_period_start_date AS start_date,
+            observation_period_end_date   AS end_date,
+            (observation_period_end_date - observation_period_start_date) / 365.25
+                AS years_observed
+        FROM {CDM()}.observation_period
+        WHERE observation_period_end_date >= observation_period_start_date
+    """)
+
+
+def get_demographics_extended() -> pd.DataFrame:
+    """Demografía con sexo, edad, año de nacimiento, raza y etnicidad."""
+    return run_query(f"""
+        SELECT
+            p.person_id,
+            c_gender.concept_name AS gender,
+            EXTRACT(YEAR FROM CURRENT_DATE) - p.year_of_birth AS age,
+            p.year_of_birth,
+            COALESCE(c_race.concept_name,      'Unknown') AS race,
+            COALESCE(c_ethnicity.concept_name, 'Unknown') AS ethnicity
+        FROM {CDM()}.person p
+        LEFT JOIN {CDM()}.concept c_gender    ON p.gender_concept_id    = c_gender.concept_id
+        LEFT JOIN {CDM()}.concept c_race      ON p.race_concept_id      = c_race.concept_id
+        LEFT JOIN {CDM()}.concept c_ethnicity ON p.ethnicity_concept_id = c_ethnicity.concept_id
+        WHERE p.year_of_birth IS NOT NULL
+    """)
+
+
+def get_visit_types(n: int = 20) -> pd.DataFrame:
+    """Distribución de tipos de encuentros médicos (urgencias, hospitalización...)."""
+    return run_query(f"""
+        SELECT
+            c.concept_name              AS visit_type,
+            COUNT(DISTINCT v.person_id) AS n_patients,
+            COUNT(*)                    AS n_visits
+        FROM {CDM()}.visit_occurrence v
+        LEFT JOIN {CDM()}.concept c ON v.visit_concept_id = c.concept_id
+        GROUP BY c.concept_name
+        ORDER BY n_visits DESC
+        LIMIT :n
+    """, {"n": n})
+
+
+def get_top_procedures(n: int = 20) -> pd.DataFrame:
+    """Procedimientos más frecuentes."""
+    return run_query(f"""
+        SELECT
+            c.concept_name,
+            c.concept_code,
+            c.vocabulary_id,
+            COUNT(DISTINCT po.person_id) AS n_patients,
+            COUNT(*)                     AS n_records
+        FROM {CDM()}.procedure_occurrence po
+        JOIN {CDM()}.concept c ON po.procedure_concept_id = c.concept_id
+        WHERE c.concept_id != 0
+        GROUP BY 1,2,3
+        ORDER BY n_patients DESC
+        LIMIT :n
+    """, {"n": n})
+
+
+def get_top_measurements(n: int = 20) -> pd.DataFrame:
+    """Mediciones / pruebas de laboratorio más frecuentes."""
+    return run_query(f"""
+        SELECT
+            c.concept_name,
+            c.concept_code,
+            c.vocabulary_id,
+            COUNT(DISTINCT m.person_id)                                AS n_patients,
+            COUNT(*)                                                   AS n_records,
+            AVG(m.value_as_number) FILTER (WHERE m.value_as_number IS NOT NULL)
+                                                                       AS mean_value
+        FROM {CDM()}.measurement m
+        JOIN {CDM()}.concept c ON m.measurement_concept_id = c.concept_id
+        WHERE c.concept_id != 0
+        GROUP BY 1,2,3
+        ORDER BY n_patients DESC
+        LIMIT :n
+    """, {"n": n})
+
+
+def get_notes_summary() -> pd.DataFrame:
+    """Volumen de notas clínicas por tipo (texto libre)."""
+    return run_query(f"""
+        SELECT
+            COALESCE(c.concept_name, 'Unknown') AS note_type,
+            COUNT(DISTINCT n.person_id)         AS n_patients,
+            COUNT(*)                            AS n_notes,
+            AVG(LENGTH(n.note_text))            AS avg_text_length
+        FROM {CDM()}.note n
+        LEFT JOIN {CDM()}.concept c ON n.note_type_concept_id = c.concept_id
+        GROUP BY c.concept_name
+        ORDER BY n_notes DESC
+    """)
+
+
+def get_cohort_size(concept_id: int) -> int:
+    """Número de pacientes con al menos un registro de la condición."""
+    df = run_query(f"""
+        SELECT COUNT(DISTINCT person_id) AS n
+        FROM {CDM()}.condition_occurrence
+        WHERE condition_concept_id = :cid
+    """, {"cid": concept_id})
+    return int(df["n"].iloc[0])
+
+
+def get_prevalence(concept_id: int) -> dict:
+    """Prevalencia: pacientes con la condición / pacientes totales."""
+    df = run_query(f"""
+        WITH total AS (SELECT COUNT(DISTINCT person_id) AS n FROM {CDM()}.person),
+        cases AS (
+            SELECT COUNT(DISTINCT person_id) AS n
+            FROM {CDM()}.condition_occurrence
+            WHERE condition_concept_id = :cid
+        )
+        SELECT t.n AS n_total, c.n AS n_cases,
+               CASE WHEN t.n > 0 THEN c.n::float / t.n ELSE 0 END AS prevalence
+        FROM total t, cases c
+    """, {"cid": concept_id})
+    r = df.iloc[0]
+    return {"n_total": int(r["n_total"]),
+            "n_cases": int(r["n_cases"]),
+            "prevalence": float(r["prevalence"])}
+
+
+def get_incidence_by_year(concept_id: int) -> pd.DataFrame:
+    """Incidencia anual: nuevos casos por año (primera aparición de la condición)."""
+    return run_query(f"""
+        WITH first_dx AS (
+            SELECT person_id,
+                   MIN(condition_start_date) AS first_date
+            FROM {CDM()}.condition_occurrence
+            WHERE condition_concept_id = :cid
+            GROUP BY person_id
+        )
+        SELECT
+            EXTRACT(YEAR FROM first_date)::int AS year,
+            COUNT(*)                           AS n_new_cases
+        FROM first_dx
+        GROUP BY 1
+        ORDER BY 1
+    """, {"cid": concept_id})
+
+
+def get_cohort_comorbidities(concept_id: int, n: int = 20) -> pd.DataFrame:
+    """Top condiciones concomitantes en pacientes de la cohorte (excluida la propia)."""
+    return run_query(f"""
+        WITH cohort AS (
+            SELECT DISTINCT person_id
+            FROM {CDM()}.condition_occurrence
+            WHERE condition_concept_id = :cid
+        )
+        SELECT
+            c.concept_name,
+            c.concept_code,
+            COUNT(DISTINCT co.person_id)              AS n_patients,
+            COUNT(DISTINCT co.person_id)::float
+              / NULLIF((SELECT COUNT(*) FROM cohort), 0) AS prop_cohort
+        FROM {CDM()}.condition_occurrence co
+        JOIN cohort                            USING (person_id)
+        JOIN {CDM()}.concept c ON co.condition_concept_id = c.concept_id
+        WHERE co.condition_concept_id <> :cid
+          AND c.concept_id != 0
+        GROUP BY 1,2
+        ORDER BY n_patients DESC
+        LIMIT :n
+    """, {"cid": concept_id, "n": n})
+
+
+def get_cohort_treatments(concept_id: int, when: str = "before",
+                          window_days: int = 365, n: int = 20) -> pd.DataFrame:
+    """Top fármacos en la ventana previa o posterior a la inclusión en la cohorte.
+
+    when = 'before' | 'after'
+    """
+    if when == "before":
+        date_filter = ("de.drug_exposure_start_date BETWEEN "
+                       "idx.index_date - INTERVAL ':w days' AND idx.index_date")
+    else:
+        date_filter = ("de.drug_exposure_start_date BETWEEN "
+                       "idx.index_date AND idx.index_date + INTERVAL ':w days'")
+    date_filter = date_filter.replace(":w", str(int(window_days)))
+
+    return run_query(f"""
+        WITH idx AS (
+            SELECT person_id, MIN(condition_start_date) AS index_date
+            FROM {CDM()}.condition_occurrence
+            WHERE condition_concept_id = :cid
+            GROUP BY person_id
+        )
+        SELECT
+            c.concept_name,
+            c.concept_code,
+            COUNT(DISTINCT de.person_id) AS n_patients,
+            COUNT(*)                     AS n_records,
+            COUNT(DISTINCT de.person_id)::float
+              / NULLIF((SELECT COUNT(*) FROM idx), 0) AS prop_cohort
+        FROM {CDM()}.drug_exposure de
+        JOIN idx                          USING (person_id)
+        JOIN {CDM()}.concept c ON de.drug_concept_id = c.concept_id
+        WHERE {date_filter}
+          AND c.concept_id != 0
+        GROUP BY 1,2
+        ORDER BY n_patients DESC
+        LIMIT :n
+    """, {"cid": concept_id, "n": n})
+
+
+def get_data_quality_summary() -> pd.DataFrame:
+    """Métricas de calidad rápida: % de valores faltantes / no mapeados en campos clave."""
+    return run_query(f"""
+        SELECT
+            'person.year_of_birth NULL' AS check_name,
+            COUNT(*) FILTER (WHERE year_of_birth IS NULL) AS n_failed,
+            COUNT(*)                                       AS n_total
+        FROM {CDM()}.person
+        UNION ALL
+        SELECT
+            'person.gender_concept_id = 0',
+            COUNT(*) FILTER (WHERE gender_concept_id = 0 OR gender_concept_id IS NULL),
+            COUNT(*)
+        FROM {CDM()}.person
+        UNION ALL
+        SELECT
+            'condition_occurrence.condition_concept_id = 0',
+            COUNT(*) FILTER (WHERE condition_concept_id = 0),
+            COUNT(*)
+        FROM {CDM()}.condition_occurrence
+        UNION ALL
+        SELECT
+            'drug_exposure.drug_concept_id = 0',
+            COUNT(*) FILTER (WHERE drug_concept_id = 0),
+            COUNT(*)
+        FROM {CDM()}.drug_exposure
+        UNION ALL
+        SELECT
+            'measurement.measurement_concept_id = 0',
+            COUNT(*) FILTER (WHERE measurement_concept_id = 0),
+            COUNT(*)
+        FROM {CDM()}.measurement
+    """)
