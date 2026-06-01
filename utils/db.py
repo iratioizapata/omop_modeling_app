@@ -532,6 +532,96 @@ def get_cohort_treatments(concept_id: int, when: str = "before",
     """, {"cid": concept_id, "n": n})
 
 
+def run_dq_full(skip_heavy: bool = False, progress_cb=None) -> tuple:
+    """Ejecuta la suite completa de checks DQ y devuelve (detalle_df, summary_dict).
+
+    Parámetros:
+        skip_heavy:  si True salta los checks sobre tablas muy grandes
+                     (measurement principalmente).
+        progress_cb: callable(i, n, check_name) opcional para actualizar UI.
+
+    Score global ponderado por severidad:
+        score = Σ(peso × (1 − fail_rate)) / Σ(peso) × 100
+    """
+    from utils.dq_checks import CHECKS, SEVERITY_WEIGHT, status_from_rate
+
+    selected = [c for c in CHECKS if not (skip_heavy and c.get("heavy"))]
+    results  = []
+
+    for i, check in enumerate(selected):
+        if progress_cb:
+            try:
+                progress_cb(i, len(selected), check["name"])
+            except Exception:
+                pass
+        try:
+            sql = check["sql"].format(CDM=CDM(), VOCAB=VOCAB())
+            df  = run_query(sql)
+            n_failed = int(df["n_failed"].iloc[0] or 0)
+            n_total  = int(df["n_total"].iloc[0] or 0)
+            if n_total == 0:
+                status, pct = "N/A", None
+            else:
+                pct    = n_failed / n_total * 100
+                status = status_from_rate(n_failed / n_total)
+            results.append({
+                "name":       check["name"],
+                "category":   check["category"],
+                "severity":   check["severity"],
+                "n_failed":   n_failed,
+                "n_total":    n_total,
+                "pct_failed": pct,
+                "status":     status,
+                "error":      None,
+            })
+        except Exception as e:
+            msg = str(e).split("\n")[0][:250]
+            results.append({
+                "name":       check["name"],
+                "category":   check["category"],
+                "severity":   check["severity"],
+                "n_failed":   None,
+                "n_total":    None,
+                "pct_failed": None,
+                "status":     "ERROR",
+                "error":      msg,
+            })
+
+    df_det = pd.DataFrame(results)
+
+    # Score global ponderado por severidad sobre checks válidos
+    valid = df_det[df_det["status"].isin(["PASS", "WARN", "FAIL"])].copy()
+    if len(valid):
+        valid["weight"] = valid["severity"].map(SEVERITY_WEIGHT)
+        valid["score"]  = 1 - valid["pct_failed"] / 100
+        global_score = float(
+            (valid["weight"] * valid["score"]).sum() / valid["weight"].sum() * 100
+        )
+    else:
+        global_score = 0.0
+
+    # Score por categoría
+    cat_scores = {}
+    for cat in valid["category"].unique():
+        sub = valid[valid["category"] == cat]
+        cat_scores[cat] = float(
+            (sub["weight"] * sub["score"]).sum() / sub["weight"].sum() * 100
+        )
+
+    counts = df_det["status"].value_counts().to_dict()
+    summary = {
+        "global_score":    round(global_score, 2),
+        "category_scores": {k: round(v, 2) for k, v in cat_scores.items()},
+        "n_checks":        len(df_det),
+        "n_pass":          int(counts.get("PASS",  0)),
+        "n_warn":          int(counts.get("WARN",  0)),
+        "n_fail":          int(counts.get("FAIL",  0)),
+        "n_error":         int(counts.get("ERROR", 0)),
+        "n_na":            int(counts.get("N/A",   0)),
+    }
+    return df_det, summary
+
+
 def get_data_quality_summary() -> pd.DataFrame:
     """Métricas de calidad rápida: % de valores faltantes / no mapeados en campos clave."""
     return run_query(f"""

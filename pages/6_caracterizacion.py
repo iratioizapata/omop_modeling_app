@@ -7,7 +7,7 @@ from utils.db import (
     get_cohort_summary, get_records_volume, get_observation_period_stats,
     get_demographics_extended, get_visit_types, get_top_conditions,
     get_top_drugs, get_top_procedures, get_top_measurements,
-    get_notes_summary, get_data_quality_summary,
+    get_notes_summary, run_dq_full,
     get_prevalence, get_incidence_by_year,
 )
 from utils.plots import (
@@ -246,34 +246,150 @@ with tab4:
 
 # ── TAB 5: CALIDAD DE DATOS ───────────────────────────────────────────────────
 with tab5:
-    st.subheader("Métricas de calidad rápidas")
-    st.markdown("Porcentaje de registros con campos clave nulos o no mapeados "
-                "(`concept_id = 0`). Equivalente reducido a *Data Quality Dashboard*.")
+    st.subheader("Auditoría completa de calidad del CDM")
+    st.markdown("""
+    Suite exhaustiva de checks sobre tu OMOP, basada en el **framework de Kahn**
+    que sigue **OHDSI Data Quality Dashboard**. Cubre las tres dimensiones de
+    calidad de datos:
 
-    if st.button("Ejecutar checks de calidad", key="load_dq", type="primary"):
-        try:
-            st.session_state["car_dq"] = get_data_quality_summary()
-        except Exception as e:
-            st.error(f"Error: {e}")
+    - **Conformance** — la estructura cumple la especificación (PK únicas, FK
+      válidas, vocabulary mapping correcto).
+    - **Completeness** — campos obligatorios no nulos.
+    - **Plausibility** — valores y fechas plausibles (rangos válidos, eventos
+      posteriores al nacimiento, fechas no en el futuro…).
 
-    if "car_dq" in st.session_state:
-        dq = st.session_state["car_dq"].copy()
-        dq["pct_failed"] = (dq["n_failed"] / dq["n_total"].replace(0, 1)) * 100
-        dq["estado"] = dq["pct_failed"].apply(
-            lambda x: "✅" if x < 5 else ("⚠️" if x < 20 else "❌"))
+    Cada check se pondera por **severidad**:
+    🔴 critical (×3)   🟡 warning (×2)   ⚪ info (×1)
+
+    **Score global = Σ(peso × (1 − fail_rate)) / Σ(peso) × 100**
+    """)
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        skip_heavy = st.checkbox(
+            "Saltar tablas pesadas (recomendado para CDMs grandes)",
+            value=True,
+            help="Salta checks sobre `measurement` cuando la tabla es muy grande "
+                 "(suele añadir varios minutos de ejecución).")
+    with col2:
+        st.write("")
+        run_dq = st.button("▶ Ejecutar auditoría completa",
+                            type="primary", key="run_dq_full_btn")
+
+    if run_dq:
+        progress = st.progress(0.0, text="Iniciando...")
+        def _cb(i, n, name):
+            progress.progress((i + 1) / n,
+                              text=f"{i + 1}/{n} — {name[:80]}")
+        with st.spinner("Ejecutando suite de calidad..."):
+            try:
+                df_det, summary = run_dq_full(skip_heavy=skip_heavy,
+                                                progress_cb=_cb)
+                st.session_state["dq_full"] = (df_det, summary)
+            except Exception as e:
+                st.error(f"Error global: {e}")
+        progress.empty()
+
+    if "dq_full" in st.session_state:
+        df_det, summary = st.session_state["dq_full"]
+        score = summary["global_score"]
+
+        # ── SCORE GLOBAL + INTERPRETACIÓN ─────────────────────────────────────
+        st.markdown("##### 🎯 Score global de calidad")
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        col1.metric("Score",        f"{score:.1f}%")
+        col2.metric("Checks",       summary["n_checks"])
+        col3.metric("✅ PASS",       summary["n_pass"])
+        col4.metric("⚠️ WARN",       summary["n_warn"])
+        col5.metric("❌ FAIL",       summary["n_fail"])
+        col6.metric("💥 Error/NA",   summary["n_error"] + summary["n_na"])
+
+        if score >= 90:
+            st.success(f"🏆 **Excelente** ({score:.1f}%) — el CDM cumple la "
+                       "especificación OMOP con un nivel de incidencias muy bajo.")
+        elif score >= 75:
+            st.info(f"👍 **Buena calidad** ({score:.1f}%) — hay incidencias "
+                    "menores; revisa los WARN para mejorarlo.")
+        elif score >= 60:
+            st.warning(f"⚠️ **Mejorable** ({score:.1f}%) — varios checks fallan; "
+                       "los FAIL pueden invalidar análisis específicos.")
+        else:
+            st.error(f"❌ **Insuficiente** ({score:.1f}%) — problemas graves "
+                     "que comprometen la fiabilidad de los análisis.")
+
+        # ── SCORE POR CATEGORÍA ──────────────────────────────────────────────
+        st.markdown("##### Score por categoría (Kahn framework)")
+        cat_df = pd.DataFrame([
+            {"Categoría": k, "Score": v}
+            for k, v in summary["category_scores"].items()
+        ]).sort_values("Score", ascending=False)
+        fig = px.bar(cat_df, x="Categoría", y="Score", text="Score",
+                      color="Score", color_continuous_scale="RdYlGn",
+                      range_color=[0, 100])
+        fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig.update_layout(yaxis_range=[0, 110], height=340,
+                           plot_bgcolor="white", showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ── FILTROS Y TABLA DE DETALLE ───────────────────────────────────────
+        st.markdown("##### Detalle por check")
+        col1, col2 = st.columns(2)
+        with col1:
+            sev_filter = st.multiselect(
+                "Severidad",
+                ["critical", "warning", "info"],
+                default=["critical", "warning", "info"])
+        with col2:
+            cat_options = list(df_det["category"].unique())
+            cat_filter = st.multiselect("Categoría", cat_options,
+                                          default=cat_options)
+
+        view = df_det[df_det["severity"].isin(sev_filter)
+                       & df_det["category"].isin(cat_filter)].copy()
+
+        emoji = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌",
+                 "ERROR": "💥", "N/A": "➖"}
+        view["status"] = view["status"].map(lambda s: f"{emoji.get(s, '')} {s}")
+        view = view.sort_values(
+            ["category", "severity", "pct_failed"],
+            ascending=[True, True, False], na_position="last")
+
         st.dataframe(
-            dq[["check_name", "n_failed", "n_total",
-                "pct_failed", "estado"]].round(2),
+            view[["category", "severity", "name", "n_failed", "n_total",
+                  "pct_failed", "status", "error"]],
             use_container_width=True, hide_index=True,
             column_config={
-                "check_name": "Check",
-                "n_failed":   st.column_config.NumberColumn("Fallos"),
-                "n_total":    st.column_config.NumberColumn("Total"),
+                "category":   "Categoría",
+                "severity":   "Severidad",
+                "name":       "Check",
+                "n_failed":   st.column_config.NumberColumn("Fallos",
+                                                              format="%d"),
+                "n_total":    st.column_config.NumberColumn("Total",
+                                                              format="%d"),
                 "pct_failed": st.column_config.NumberColumn("% fallos",
-                                                              format="%.2f%%"),
-                "estado":     "Estado",
+                                                              format="%.2f"),
+                "status":     "Estado",
+                "error":      "Error (si aplica)",
             })
-        st.caption("✅ <5% · ⚠️ 5-20% · ❌ >20%")
+
+        st.caption("Estado: ✅ PASS <5%  ·  ⚠️ WARN 5-20%  ·  ❌ FAIL ≥20%  "
+                   "·  💥 ERROR (query falló)  ·  ➖ N/A (tabla vacía)")
+
+        # ── DESCARGAS ────────────────────────────────────────────────────────
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button("⬇ Descargar informe detallado (CSV)",
+                                data=df_det.to_csv(index=False),
+                                file_name="dq_full_report.csv",
+                                mime="text/csv")
+        with col2:
+            import json
+            st.download_button("⬇ Descargar resumen (JSON)",
+                                data=json.dumps(summary, indent=2,
+                                                 ensure_ascii=False),
+                                file_name="dq_summary.json",
+                                mime="application/json")
 
 # ── TAB 6: EXPORTAR ───────────────────────────────────────────────────────────
 with tab6:

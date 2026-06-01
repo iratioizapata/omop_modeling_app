@@ -6,7 +6,8 @@ from utils.db import (get_demographics, get_top_conditions,
                        get_top_measurements, get_visit_types,
                        search_concepts)
 from utils.plots import (plot_age_distribution, plot_gender_pie,
-                          plot_top_concepts, plot_visit_types)
+                          plot_top_concepts, plot_visit_types,
+                          plot_age_pyramid)
 
 st.set_page_config(page_title="Exploración OMOP", page_icon="🔍", layout="wide")
 st.title("🔍 Exploración del CDM OMOP")
@@ -36,6 +37,8 @@ with tab1:
             st.plotly_chart(plot_age_distribution(df), use_container_width=True)
         with col2:
             st.plotly_chart(plot_gender_pie(df), use_container_width=True)
+
+        st.plotly_chart(plot_age_pyramid(df), use_container_width=True)
 
         with st.expander("📊 Estadísticas descriptivas"):
             st.dataframe(df[["age"]].describe().round(1), use_container_width=True)
